@@ -6428,3 +6428,54 @@ Original filing (2026-04-18): the session emitted `SessionStart hook (completed)
 
 
 450. **`prompt` emits `kind:"missing_credentials"` JSON on STDERR (not stdout), leaving stdout at 0 bytes — automation pattern `output=$(claw prompt hello --output-format json)` captures nothing on auth-absent failure; `doctor` correctly surfaces `auth.status:"warn"` with `api_key_present:false` but exposes no `prompt_ready:false` field that automation can check before invoking `prompt`** — dogfooded 2026-05-16 by Jobdori on `a35ee9a0` in response to Clawhip pinpoint nudge at `1505208225321062521`. Exact reproduction (isolated env, no creds, fresh git repo, HEAD `a35ee9a0`): `timeout 5 env -i HOME=$ISOLATED_HOME PATH=$PATH CLAW_CONFIG_HOME=$PROBE/.claw-cfg claw prompt hello --output-format json > stdout.txt 2> stderr.txt` → stdout = **0 bytes**, stderr = 195 bytes containing `{"error":"missing Anthropic credentials…","exit_code":1,"hint":null,"kind":"missing_credentials","type":"error"}`, exit code 1. Confirms Gaebal's `1505208553793781792` pinpoint that `prompt` timeout + zero bytes was the prior state — HEAD `a35ee9a0` now correctly exits 1 with `kind:"missing_credentials"` **but the envelope is still routed to stderr** (issue #447 class, same class as prior entries #422, #435). **Contrast with `doctor`:** `claw doctor --output-format json 2>/dev/null` succeeds to stdout with `checks[auth].status:"warn"`, `api_key_present:false`, `auth_token_present:false` — but the auth check has no `prompt_ready:false` field. Automation that gates on `doctor` before invoking `prompt` must re-derive readiness from `api_key_present && auth_token_present` — there is no single canonical boolean. **Three compound problems:** (a) **stdout-empty on `--output-format json` failure**: same class as #447; `prompt`'s error envelope goes to stderr, not stdout. The canonical automation idiom `if ! result=$(claw prompt "q" --output-format json); then echo "$result" | jq .kind; fi` sees `$result=""` on failure — the jq call gets nothing. All `--output-format json` error paths must route JSON to stdout per #447 contract; (b) **`doctor` missing `prompt_ready` field**: `doctor --output-format json` already knows auth is absent (`api_key_present:false`) but surfaces no derived `prompt_ready:bool` or `prompt_blocked_reason:string` field. Automation must infer readiness from `api_key_present || auth_token_present || legacy_*_present` — a 5-field OR across legacy fields that is fragile as auth mechanisms evolve. A single `prompt_ready:false` (with `prompt_blocked_reason:"auth_missing"`) inside the `auth` check would give downstream a stable contract; (c) **`claw prompt` with no auth does no preflight and fires straight at the API**: the preflight check that `doctor` runs (auth discovery) is not reused by `prompt` to emit a fast typed error before attempting the network call. Both Gaebal's pinpoint (prompt hanging silently on older HEAD) and the current behavior (prompt hitting auth gate after a brief API attempt) stem from the same root: prompt does not short-circuit at the point where `doctor` already knows auth is absent. If `doctor` can emit `kind:"doctor"` with `auth.status:"warn"` in ~20ms without a network call, `prompt` should emit `kind:"missing_credentials"` in the same window and output it to stdout. **Required fix shape:** (a) `prompt --output-format json` must write the `kind:"missing_credentials"` JSON envelope to **stdout**, not stderr — same fix as #447 for all error envelopes; (b) add `prompt_ready:bool` and `prompt_blocked_reason:string|null` to the `auth` check in `doctor --output-format json`; derive it as `api_key_present || auth_token_present || legacy_saved_oauth_present`; (c) `prompt` must run the credential preflight check (same codepath as doctor's auth check) before attempting any API call and emit `{"kind":"missing_credentials","prompt_blocked_reason":"auth_missing"}` on **stdout** with exit 1 if the check fails; (d) `--output-format json` stdout routing fix must cover: `prompt`, `session list` (cross-ref #449), `skills uninstall` (cross-ref #431), `resume` (cross-ref #435), `acp serve` (cross-ref #443) — the full `kind:"missing_credentials"` class; (e) regression test: `claw prompt hello --output-format json` with no creds writes JSON to stdout (0 bytes stderr), exits 1, `kind:"missing_credentials"`, in under 200ms (no network attempt). **Why this matters:** `prompt` is the primary consumer entry point. Auth-absent failure routing to stderr breaks every automation wrapper that captures `$(claw prompt ... --output-format json)`. The `doctor` preflight metadata gap means auth-readiness checks require parsing 5 legacy fields instead of reading one boolean. Cross-references #447 (all JSON error envelopes on stderr), #449 (session list hits auth gate), #431 (skills uninstall hits auth gate), #357 (auth gate on local ops cluster), #422 (exit-code parity). Source: Jobdori live dogfood, `a35ee9a0`, 2026-05-16.
+
+689. **`acp --help --output-format json` is JSON-valid but message-only (`{kind, command, topic, message}`), even though the actual ACP discoverability surface (`claw --output-format json acp`, `acp serve`, `--acp`, `-acp`) already exposes a rich structured status contract (`supported:false`, `phase`, `protocol`, `serve_alias_only`, `contracts`, `recommended_workflows`, `schema_version`, tracking IDs); editor wrappers cannot discover the ACP/Zed non-daemon contract from help without invoking ACP status and reverse-engineering the payload** — dogfooded 2026-05-25 for the 00:00 Clawhip nudge at message `1508258328189472908`, reproduced on a freshly rebuilt current `origin/main` binary (`git_sha f8e1bb726`) from `/tmp/cc-probe-main-2130`. Active claw-code sessions: none.
+
+    Reproduction:
+
+    ```bash
+    $ env -i HOME=/tmp/iso44/home PATH=/usr/bin:/bin TERM=dumb \
+        claw acp --help --output-format json
+    {
+      "command": "acp",
+      "kind": "help",
+      "message": "ACP / Zed\n  Usage            claw acp [serve] [--output-format <format>]\n  Aliases          claw --acp · claw -acp\n  Purpose          explain the current editor-facing ACP/Zed launch contract without starting the runtime\n  Status           discoverability only; `serve` is a status alias and does not launch a daemon yet\n  Formats          text (default), json\n  Related          ROADMAP #64a (discoverability) · ROADMAP #76 (real ACP support) · claw --help",
+      "topic": "acp"
+    }
+    ```
+
+    Actual ACP status JSON on the same binary is much richer and already structured:
+
+    ```bash
+    $ claw --output-format json acp | jq '{kind,status,supported,phase,serve_alias_only,schema_version,protocol,contracts,recommended_workflows,tracking}'
+    {
+      "kind": "acp",
+      "status": "unsupported",
+      "supported": false,
+      "phase": "discoverability_only",
+      "serve_alias_only": true,
+      "schema_version": "1.0",
+      "protocol": {
+        "daemon": false,
+        "endpoint": null,
+        "json_rpc": false,
+        "name": "ACP/Zed",
+        "serve_starts_daemon": false
+      },
+      "contracts": {
+        "blocking_gates": ["task_packet_schema", "session_control_schema", "event_report_schema"],
+        "stable_status_surface": "claw acp [serve] --output-format json",
+        "unsupported_invocation_kind": "unsupported_acp_invocation"
+      },
+      "recommended_workflows": ["claw prompt TEXT", "claw", "claw doctor"],
+      "tracking": "ROADMAP #76 / #3033 / #3004"
+    }
+    ```
+
+    All aliases (`claw --output-format json acp`, `acp serve`, `--acp`, `-acp`) return the same structured status payload. Help, however, omits structured `aliases`, `output_fields`, `status_values`, `phase_values`, `protocol_fields`, `contract_fields`, `local_only`, `requires_credentials:false`, `requires_provider_request:false`, `mutates_workspace:false`, and `serve_starts_daemon:false` metadata.
+
+    **Why distinct from existing items:** #64a verified that ACP discoverability exists and returns a structured status payload; #76 tracks real ACP/Zed daemon implementation. #689 is narrower: the help JSON for the existing ACP discoverability command does not expose the same schema/contract fields that the status payload already has. #325 is broad top-level help prose-wrapper; #686–#688 cover doctor/status/sandbox help-schema depth. This one is ACP-specific because editor integrations are likely to query help before deciding whether `serve` launches a process, and here `serve` intentionally does not.
+
+    **Why this matters:** an editor wrapper or installer asking “can I launch claw as an ACP daemon?” should be able to answer from `acp --help --output-format json` without accidentally invoking the status path or parsing a prose sentence. The critical contract is negative capability: `supported:false`, `serve_alias_only:true`, `protocol.daemon:false`, `protocol.json_rpc:false`, `protocol.serve_starts_daemon:false`, and the blocking gates for real support. Keeping those only in runtime status makes help less useful than the command it documents.
+
+    **Required fix shape:** (a) Extend `acp --help --output-format json` with structured fields mirroring the ACP status contract: `usage:"claw acp [serve] [--output-format <format>]"`, `aliases:["acp","--acp","-acp"]`, `formats:["text","json"]`, `related:["ROADMAP #64a","ROADMAP #76","claw --help"]`, `local_only:true`, `requires_credentials:false`, `requires_provider_request:false`, `mutates_workspace:false`, `serve_starts_daemon:false`, `output_fields:["kind","status","supported","phase","protocol","contracts","recommended_workflows","schema_version"]`, `status_values:["unsupported"]`, `phase_values:["discoverability_only"]`, and `protocol_fields:["daemon","endpoint","json_rpc","name","serve_starts_daemon"]`. (b) Derive help metadata from the same ACP status struct/registry so help and status cannot drift. (c) Keep `message` as the human summary only. **Acceptance check:** `claw acp --help --output-format json | jq -e '.command=="acp" and .local_only==true and .requires_credentials==false and .serve_starts_daemon==false and ([.output_fields[]] | index("protocol") and index("contracts")) and ([.aliases[]] | index("--acp"))'` should pass; currently those fields are absent. Source: gaebal-gajae dogfood for the 2026-05-25 00:00 Clawhip nudge.
