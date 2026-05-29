@@ -1741,6 +1741,21 @@ fn parse_direct_slash_cli_action(
                 }),
             }
         }
+        // #831: resume-safe slash commands invoked directly (claw /status,
+        // claw /diff, claw /version, claw /doctor, claw /sandbox) should
+        // route to the same CliAction as their subcommand equivalents.
+        // Previously they fell through to the generic interactive_only arm.
+        Ok(Some(SlashCommand::Status)) => Ok(CliAction::Status {
+            model: model.to_string(),
+            model_flag_raw: None,
+            permission_mode: permission_mode_override.unwrap_or_else(default_permission_mode),
+            output_format,
+            allowed_tools,
+        }),
+        Ok(Some(SlashCommand::Diff)) => Ok(CliAction::Diff { output_format }),
+        Ok(Some(SlashCommand::Version)) => Ok(CliAction::Version { output_format }),
+        Ok(Some(SlashCommand::Doctor)) => Ok(CliAction::Doctor { output_format }),
+        Ok(Some(SlashCommand::Sandbox)) => Ok(CliAction::Sandbox { output_format }),
         Ok(Some(SlashCommand::Unknown(name))) => {
             // #828: /approve and /deny are valid REPL-only slash commands that
             // are not SlashCommand enum variants (they require an active tool

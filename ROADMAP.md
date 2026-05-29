@@ -7906,3 +7906,9 @@ Original filing (2026-04-18): the session emitted `SessionStart hook (completed)
     **Required fix shape.** The MCP subcommand parser should detect `show` with no following token and emit `missing_argument: mcp show requires a server name.\nUsage: claw mcp show <server>` with a distinct `error_kind`. Update the classifier arm to return `missing_argument` for this prefix.
 
     **Acceptance.** `claw --output-format json mcp show` exits rc=1, stdout `error_kind:"missing_argument"`, stderr empty. Hint contains usage example. [SCOPE: claw-code]
+
+831. **Direct-slash resume-safe commands (`claw /status`, `claw /diff`, `claw /version`, `claw /doctor`, `claw /sandbox`) return `interactive_only` instead of executing** — dogfooded 2026-05-29 17:05 on `main` `ac5b19de`. `/help`, `/agents`, `/skills list` work because they have explicit `CliAction` routing arms in `parse_direct_slash_command`. `/status`, `/diff`, `/version`, `/doctor`, `/sandbox` fall through to the generic `Ok(Some(command)) => Err(interactive_only...)` arm. The hint correctly suggests `--resume SESSION.jsonl /status`, but `claw /status` directly should also work — these commands don't need a session.
+
+    **Required fix shape.** Add explicit `Ok(Some(SlashCommand::Status | Diff | Version | Doctor | Sandbox))` arms in `parse_direct_slash_command` routing to the same `CliAction` variants as `"status"` / `"diff"` / `"version"` / `"doctor"` / `"sandbox"` subcommands.
+
+    **Acceptance.** `claw --output-format json /status` exits 0 and emits the same envelope as `claw --output-format json status`. [SCOPE: claw-code]

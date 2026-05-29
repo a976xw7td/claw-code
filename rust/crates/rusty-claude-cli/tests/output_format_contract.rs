@@ -4084,3 +4084,34 @@ fn mcp_show_missing_server_name_emits_missing_argument() {
         "mcp show (no name) JSON must have empty stderr (#830): {stderr:?}"
     );
 }
+
+// #831: direct-slash resume-safe commands must route to their CliAction equivalents
+#[test]
+fn direct_slash_resume_safe_commands_route_correctly() {
+    let root = unique_temp_dir("direct-slash-resume-831");
+    std::fs::create_dir_all(&root).expect("create temp dir");
+    // /version, /doctor, /sandbox, /diff all work without --resume
+    for (cmd, expected_kind) in &[
+        ("/version", "version"),
+        ("/sandbox", "sandbox"),
+        ("/diff", "diff"),
+    ] {
+        let output = run_claw(&root, &["--output-format", "json", cmd], &[]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let j: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|_| panic!("{cmd} must emit JSON (#831), got: {stdout:?}"));
+        assert_eq!(
+            j["status"], "ok",
+            "{cmd} direct slash must exit ok (#831): {j}"
+        );
+        assert_ne!(
+            j["error_kind"], "interactive_only",
+            "{cmd} direct slash must not emit interactive_only (#831): {j}"
+        );
+        let kind = j["kind"].as_str().unwrap_or("");
+        assert_eq!(
+            kind, *expected_kind,
+            "{cmd} direct slash must emit kind={expected_kind} (#831): {j}"
+        );
+    }
+}
