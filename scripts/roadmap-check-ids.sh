@@ -73,6 +73,6 @@ awk -v min_id="$MIN_ID" -v path="$ROADMAP" '
       }
       exit 1
     }
-    print "roadmap id check passed: no duplicate ids >= " min_id " in " path
+    print "roadmap id check passed: no duplicate ids >= " min_id " in " path > "/dev/stderr"
   }
 ' "$ROADMAP"

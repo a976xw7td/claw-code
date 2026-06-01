@@ -1644,23 +1644,29 @@ mod tests {
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let worktree = tmp.path().join("worktree");
-        let git_dir = tmp.path().join("external-gitdir");
+        let external_gitdir = tmp.path().join("external-gitdir");
         fs::create_dir_all(&worktree).expect("worktree dir");
-        fs::create_dir_all(git_dir.join("objects")).expect("objects dir");
-        fs::create_dir_all(git_dir.join("refs/heads")).expect("refs dir");
-        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
-        fs::write(
-            worktree.join(".git"),
-            format!("gitdir: {}\n", git_dir.display()),
-        )
-        .expect(".git file");
 
-        let original_permissions = fs::metadata(&git_dir)
+        // Initialize a real git repo with separate-git-dir for proper `git rev-parse` support
+        let output = Command::new("git")
+            .args([
+                "init",
+                "--separate-git-dir",
+                &external_gitdir.to_string_lossy(),
+                "--initial-branch=main",
+                &worktree.to_string_lossy(),
+            ])
+            .output()
+            .expect("git init should succeed");
+        assert!(output.status.success(), "git init failed: {:?}", output);
+
+        let original_permissions = fs::metadata(&external_gitdir)
             .expect("gitdir metadata")
             .permissions();
         let mut read_only_permissions = original_permissions.clone();
         read_only_permissions.set_mode(0o555);
-        fs::set_permissions(&git_dir, read_only_permissions).expect("make gitdir read-only");
+        fs::set_permissions(&external_gitdir, read_only_permissions)
+            .expect("make gitdir read-only");
 
         let warnings = startup_preflight_warnings(&worktree, "Audit repository.");
         let registry = WorkerRegistry::new();
@@ -1669,11 +1675,15 @@ mod tests {
             .observe_startup_preflight(&worker.worker_id, "Audit repository.")
             .expect("preflight should run");
 
-        fs::set_permissions(&git_dir, original_permissions).expect("restore gitdir permissions");
+        fs::set_permissions(&external_gitdir, original_permissions)
+            .expect("restore gitdir permissions");
 
         assert!(warnings.iter().any(|warning| {
             warning.kind == WorkerStartupPreflightWarningKind::GitMetadataNotWritable
-                && warning.path.as_deref() == Some(git_dir.to_string_lossy().as_ref())
+                && warning
+                    .path
+                    .as_deref()
+                    .map_or(false, |p| p.contains("external-gitdir"))
         }));
         assert!(observed.events.iter().any(|event| {
             matches!(
@@ -1682,7 +1692,7 @@ mod tests {
                     kind: WorkerStartupPreflightWarningKind::GitMetadataNotWritable,
                     path: Some(path),
                     ..
-                }) if path == git_dir.to_string_lossy().as_ref()
+                }) if path.contains("external-gitdir")
             )
         }));
     }
